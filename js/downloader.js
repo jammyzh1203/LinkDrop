@@ -273,8 +273,72 @@
     '480': 'res:480,vcodec:h264,acodec:aac'
   };
 
+  // ---------------------------------------------------------------- 代理例外
+  // yt-dlp 会读取系统代理（macOS 网络设置 / Windows Internet 选项 / HTTP(S)_PROXY），
+  // 但不认系统代理的「例外 / 绕过」列表。像新片场这类国内站点，用户在 Clash 等工具里设成直连、
+  // 并加进了系统代理例外，yt-dlp 却仍然走代理，结果 SSL 握手被掐断
+  // （UNEXPECTED_EOF_WHILE_READING）。这里自己读例外列表，命中就让 yt-dlp 直连。
+
+  var bypassCache = null;
+
+  function readBypassList() {
+    if (bypassCache) return bypassCache;
+    var list = [];
+    (process.env.NO_PROXY || process.env.no_proxy || '').split(',').forEach(function (s) { list.push(s); });
+    try {
+      if (IS_MAC) {
+        var out = String(cp.execFileSync('/usr/sbin/scutil', ['--proxy'], { timeout: 3000 }));
+        var m = /ExceptionsList\s*:\s*<array>\s*\{([\s\S]*?)\}/.exec(out);
+        if (m) m[1].split('\n').forEach(function (l) { var x = /^\s*\d+\s*:\s*(.+?)\s*$/.exec(l); if (x) list.push(x[1]); });
+      } else if (IS_WIN) {
+        var reg = String(cp.execFileSync('reg', ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', '/v', 'ProxyOverride'], { timeout: 3000, windowsHide: true }));
+        var w = /ProxyOverride\s+REG_\w+\s+(.*)/.exec(reg);
+        if (w) w[1].split(';').forEach(function (s) { list.push(s); });
+      }
+    } catch (e) { /* 没配置系统代理 */ }
+    bypassCache = list.map(function (s) { return s.trim().toLowerCase(); }).filter(Boolean);
+    return bypassCache;
+  }
+
+  function hostOf(url) {
+    try { return new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, ''); } catch (e) { return ''; }
+  }
+
+  /** 该主机是否在系统代理例外 / NO_PROXY 里 */
+  function proxyBypassed(host) {
+    if (!host) return false;
+    return readBypassList().some(function (p) {
+      if (p === '*') return true;
+      if (p === '<local>') return host.indexOf('.') < 0;
+      if (p.indexOf('/') >= 0) return false; // CIDR 网段，只对 IP 有意义，忽略
+      // *.example.com / .example.com / example.com 都按「本域及子域」处理
+      p = p.replace(/^\*?\./, '').replace(/^\*/, '');
+      if (!p) return false;
+      if (p.indexOf('*') >= 0) {
+        return new RegExp('^' + p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$').test(host);
+      }
+      return host === p || host.slice(-(p.length + 1)) === '.' + p;
+    });
+  }
+
+  /** 代理导致的连接失败（被掐断 / 隧道失败），可以改用直连重试 */
+  function isProxyError(msg) {
+    return /UNEXPECTED_EOF_WHILE_READING|EOF occurred in violation of protocol|ProxyError|Tunnel connection failed|Unable to connect to proxy|SSL_ERROR_SYSCALL|Connection closed abruptly|Remote end closed connection/i.test(msg || '');
+  }
+
+  // ---------------------------------------------------------------- 站点专用参数
+
+  var SITE_ARGS = [
+    {
+      // 新片场的 WAF 会对「像浏览器」的请求（完整 Chrome UA）返回人机验证页，yt-dlp 就解析不到 next.js 数据。
+      // 换一个非浏览器 UA 就会直接返回页面。视频 CDN（xpccdn.com）不带新片场 Referer 会返回 403
+      host: /(^|\.)xinpianchang\.com$/,
+      args: ['--user-agent', 'LinkDrop', '--referer', 'https://www.xinpianchang.com/']
+    }
+  ];
+
   /**
-   * opts: { outDir, quality, cookiesBrowser, tools:{ffmpeg, jsRuntime}, playlist }
+   * opts: { outDir, quality, cookiesBrowser, tools:{ffmpeg, jsRuntime}, playlist, direct }
    */
   function buildArgs(url, opts) {
     var tools = opts.tools || {};
@@ -291,6 +355,9 @@
     if (tools.ffmpeg) a.push('--ffmpeg-location', tools.ffmpeg);
     if (tools.jsRuntime) a.push('--js-runtimes', tools.jsRuntime.name + ':' + tools.jsRuntime.path);
     if (opts.cookiesBrowser) a.push('--cookies-from-browser', opts.cookiesBrowser);
+    var host = hostOf(url);
+    if (opts.direct || proxyBypassed(host)) a.push('--proxy', '');
+    SITE_ARGS.forEach(function (s) { if (s.host.test(host)) a.push.apply(a, s.args); });
 
     if (opts.quality === 'audio') {
       a.push('-f', 'ba[acodec^=mp4a]/ba/b');
@@ -343,6 +410,9 @@
       return { kind: 'js', msg: '缺少 JS 运行时（Deno/Node），YouTube 无法解析' };
     }
     if (/ffmpeg/i.test(msg) && /not found|not installed/i.test(msg)) return { kind: 'ffmpeg', msg: '缺少 ffmpeg，无法合并音视频' };
+    if (isProxyError(msg)) {
+      return { kind: null, msg: '网络连接被中断（已自动尝试直连仍失败）。如果开着代理 / VPN，请把该网站设为直连或暂时关闭代理后重试' };
+    }
     if (/Unsupported URL/i.test(msg)) return { kind: null, msg: '不支持的链接：' + msg };
     if (/Private video/i.test(msg)) return { kind: null, msg: '私密视频，无法下载' };
     if (/HTTP Error 412|HTTP Error 403/i.test(msg)) {
@@ -385,82 +455,95 @@
   function download(ytdlp, url, opts, handlers) {
     handlers = handlers || {};
     try { mkdirp(opts.outDir); } catch (e) { setTimeout(function () { handlers.onError && handlers.onError('无法创建下载目录：' + e.message, 'dir'); }); return { cancel: function () {} }; }
-    var args = buildArgs(url, opts);
-    var child = cp.spawn(ytdlp, args, { env: childEnv(), windowsHide: true });
-    var files = [];
-    var errors = [];
-    var tail = [];
     var cancelled = false;
-    var lastPart = null;
-    var partIndex = 0;
-
-    function onLine(line) {
-      line = line.replace(/\r/g, '').trim();
-      if (!line) return;
-      if (line.indexOf('LDPROG|') === 0) {
-        var p = line.split('|');
-        var part = p[4] === 'none' ? 'audio' : 'video';
-        if (part !== lastPart) { lastPart = part; partIndex++; }
-        handlers.onProgress && handlers.onProgress({
-          percent: parsePercent(p[1]), speed: (p[2] || '').trim(), eta: (p[3] || '').trim(),
-          part: part, partIndex: partIndex
-        });
-      } else if (line.indexOf('LDMETA') === 0) {
-        try { handlers.onMeta && handlers.onMeta(JSON.parse(line.slice(6))); } catch (e) { /* ignore */ }
-      } else if (line.indexOf('LDFILE') === 0) {
-        try { files.push(JSON.parse(line.slice(6))); } catch (e) { /* ignore */ }
-      } else if (/^ERROR:/.test(line)) {
-        errors.push(cleanErr(line));
-      } else if (/^\[(Merger|ExtractAudio|VideoConvertor|FixupM3u8|FixupM4a)\]/.test(line)) {
-        handlers.onStage && handlers.onStage(/ExtractAudio/.test(line) ? '提取音频…' : '合并音视频…');
-      } else {
-        tail.push(line);
-        if (tail.length > 20) tail.shift();
-      }
-    }
-
-    function pipe(stream) {
-      var buf = '';
-      stream.setEncoding('utf8');
-      stream.on('data', function (d) {
-        buf += d;
-        var parts = buf.split('\n');
-        buf = parts.pop();
-        parts.forEach(onLine);
-      });
-      stream.on('end', function () { if (buf) onLine(buf); });
-    }
-    pipe(child.stdout);
-    pipe(child.stderr);
-
-    var finished = false;
-    function finish(fn) { if (!finished) { finished = true; fn(); } }
-
-    child.on('error', function (e) {
-      finish(function () { handlers.onError && handlers.onError('无法启动 yt-dlp：' + e.message); });
-    });
-    child.on('close', function (code) {
-      finish(function () {
-        if (cancelled) return handlers.onError && handlers.onError('已取消', 'cancelled');
-        var existing = files.filter(isFile);
-        if (code === 0 && existing.length) return handlers.onDone && handlers.onDone(existing);
-        var raw = errors.length ? errors[errors.length - 1]
-          : (tail.length ? tail.slice(-3).join(' / ') : 'yt-dlp 退出码 ' + code);
-        var fe = friendlyError(raw, opts.cookiesBrowser);
-        handlers.onError && handlers.onError(fe.msg, fe.kind, raw);
-      });
-    });
-
-    return {
-      args: args,
+    var child = null;
+    var ctl = {
+      args: null,
       cancel: function () {
         cancelled = true;
+        if (!child) return;
         try {
           if (IS_WIN) cp.execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
           else child.kill('SIGTERM');
         } catch (e) { /* ignore */ }
       }
     };
+    start(!!opts.direct);
+    return ctl;
+
+    function start(direct) {
+      var runOpts = Object.assign({}, opts, { direct: direct });
+      var args = buildArgs(url, runOpts);
+      ctl.args = args;
+      child = cp.spawn(ytdlp, args, { env: childEnv(), windowsHide: true });
+      var files = [];
+      var errors = [];
+      var tail = [];
+      var lastPart = null;
+      var partIndex = 0;
+
+      function onLine(line) {
+        line = line.replace(/\r/g, '').trim();
+        if (!line) return;
+        if (line.indexOf('LDPROG|') === 0) {
+          var p = line.split('|');
+          var part = p[4] === 'none' ? 'audio' : 'video';
+          if (part !== lastPart) { lastPart = part; partIndex++; }
+          handlers.onProgress && handlers.onProgress({
+            percent: parsePercent(p[1]), speed: (p[2] || '').trim(), eta: (p[3] || '').trim(),
+            part: part, partIndex: partIndex
+          });
+        } else if (line.indexOf('LDMETA') === 0) {
+          try { handlers.onMeta && handlers.onMeta(JSON.parse(line.slice(6))); } catch (e) { /* ignore */ }
+        } else if (line.indexOf('LDFILE') === 0) {
+          try { files.push(JSON.parse(line.slice(6))); } catch (e) { /* ignore */ }
+        } else if (/^ERROR:/.test(line)) {
+          errors.push(cleanErr(line));
+        } else if (/^\[(Merger|ExtractAudio|VideoConvertor|FixupM3u8|FixupM4a)\]/.test(line)) {
+          handlers.onStage && handlers.onStage(/ExtractAudio/.test(line) ? '提取音频…' : '合并音视频…');
+        } else {
+          tail.push(line);
+          if (tail.length > 20) tail.shift();
+        }
+      }
+
+      function pipe(stream) {
+        var buf = '';
+        stream.setEncoding('utf8');
+        stream.on('data', function (d) {
+          buf += d;
+          var parts = buf.split('\n');
+          buf = parts.pop();
+          parts.forEach(onLine);
+        });
+        stream.on('end', function () { if (buf) onLine(buf); });
+      }
+      pipe(child.stdout);
+      pipe(child.stderr);
+
+      var finished = false;
+      function finish(fn) { if (!finished) { finished = true; fn(); } }
+
+      child.on('error', function (e) {
+        finish(function () { handlers.onError && handlers.onError('无法启动 yt-dlp：' + e.message); });
+      });
+      child.on('close', function (code) {
+        finish(function () {
+          if (cancelled) return handlers.onError && handlers.onError('已取消', 'cancelled');
+          var existing = files.filter(isFile);
+          if (code === 0 && existing.length) return handlers.onDone && handlers.onDone(existing);
+          var raw = errors.length ? errors[errors.length - 1]
+            : (tail.length ? tail.slice(-3).join(' / ') : 'yt-dlp 退出码 ' + code);
+          // 走代理时连接被掐断：改用直连自动重试一次（没开代理时等同于原样重试）
+          if (!direct && isProxyError(raw)) {
+            handlers.onStage && handlers.onStage('代理连接失败，改用直连重试…');
+            return start(true);
+          }
+          var fe = friendlyError(raw, opts.cookiesBrowser);
+          handlers.onError && handlers.onError(fe.msg, fe.kind, raw);
+        });
+      });
+    }
   }
 
   // ---------------------------------------------------------------- 阅流（yueliu.smallrig.com）分享链接
