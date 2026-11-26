@@ -330,10 +330,9 @@
 
   var SITE_ARGS = [
     {
-      // 新片场的 WAF 会对「像浏览器」的请求（完整 Chrome UA）返回人机验证页，yt-dlp 就解析不到 next.js 数据。
-      // 换一个非浏览器 UA 就会直接返回页面。视频 CDN（xpccdn.com）不带新片场 Referer 会返回 403
+      // 新片场的视频 CDN（xpccdn.com）不带新片场 Referer 会返回 403
       host: /(^|\.)xinpianchang\.com$/,
-      args: ['--user-agent', 'LinkDrop', '--referer', 'https://www.xinpianchang.com/']
+      args: ['--referer', 'https://www.xinpianchang.com/']
     }
   ];
 
@@ -415,6 +414,19 @@
     }
     if (/Unsupported URL/i.test(msg)) return { kind: null, msg: '不支持的链接：' + msg };
     if (/Private video/i.test(msg)) return { kind: null, msg: '私密视频，无法下载' };
+    // 网站的反爬 / 人机验证拦截：444 是服务器直接断开；验证页会让 yt-dlp 解析不到页面数据
+    if (/HTTP Error 444/i.test(msg)) {
+      return {
+        kind: 'auth',
+        msg: '该网站拒绝了本次请求（HTTP 444，通常是反爬限制，可能是短时间内请求过多）。请稍后再试，或先在浏览器里登录该网站，再用登录信息重试：'
+      };
+    }
+    if (/Unable to extract next\.js data|captcha|人机验证/i.test(msg)) {
+      return {
+        kind: 'auth',
+        msg: '未能读取页面数据：可能被该网站的人机验证拦截，也可能网站已改版。可稍后重试、在设置里更新 yt-dlp，或先在浏览器里登录该网站，再用登录信息重试：'
+      };
+    }
     if (/HTTP Error 412|HTTP Error 403/i.test(msg)) {
       return { kind: 'auth', msg: '网站拒绝访问（' + msg.replace(/^.*(HTTP Error \d+).*$/, '$1') + '），可用已登录的浏览器重试：' };
     }
