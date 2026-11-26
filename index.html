@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>LinkDrop</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute">
+    <symbol id="i-paste" viewBox="0 0 16 16"><path d="M5.5 2.5h5v2h-5zM4 3.5H3v10h10v-10h-1" fill="none" stroke="currentColor" stroke-width="1.2"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></g></symbol>
+    <symbol id="i-x" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.4"/></symbol>
+    <symbol id="i-retry" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5v3h-3" fill="none" stroke="currentColor" stroke-width="1.3"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 16 16"><path d="M1.5 3.5h5l1.5 1.5h6.5v8h-13z" fill="none" stroke="currentColor" stroke-width="1.2"/></symbol>
+    <symbol id="i-link" viewBox="0 0 48 48"><path d="M20 28l8-8M17 22l-4 4a6 6 0 0 0 9 9l4-4M31 26l4-4a6 6 0 0 0-9-9l-4 4" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></symbol>
+  </svg>
+
+  <div id="app">
+    <header class="top">
+      <div class="input-wrap" id="inputWrap">
+        <textarea id="url" rows="1" spellcheck="false" placeholder="粘贴 YouTube / Bilibili 等视频链接"></textarea>
+        <button id="pasteBtn" class="ghost" title="从剪贴板粘贴并下载"><svg><use href="#i-paste"/></svg></button>
+      </div>
+      <button id="goBtn" class="primary">下载</button>
+    </header>
+
+    <div class="opts">
+      <select id="quality" title="画质">
+        <option value="1080">1080p · H.264</option>
+        <option value="720">720p · H.264</option>
+        <option value="480">480p · H.264</option>
+        <option value="2160">4K（可能需转码）</option>
+        <option value="best">最高画质（可能需转码）</option>
+        <option value="audio">仅音频 · M4A</option>
+      </select>
+      <select id="place" title="下载完成后">
+        <option value="none">导入到素材箱</option>
+        <option value="insert">导入并插入到播放头</option>
+        <option value="overwrite">导入并覆盖到播放头</option>
+      </select>
+      <button id="settingsBtn" class="ghost" title="设置"><svg><use href="#i-gear"/></svg></button>
+    </div>
+
+    <div id="banner" class="banner hidden"></div>
+
+    <section id="settings" class="settings hidden">
+      <label class="row">
+        <span>素材箱</span>
+        <input id="binName" type="text" placeholder="留空则导入到项目根目录">
+      </label>
+      <label class="row" id="dirRow">
+        <span>保存到</span>
+        <select id="dirMode">
+          <option value="project">项目文件旁的「LinkDrop 素材」</option>
+          <option value="custom">自定义文件夹</option>
+        </select>
+      </label>
+      <div class="row" id="customDirRow">
+        <span></span>
+        <div class="path-pick">
+          <code id="customDir"></code>
+          <button id="pickDir" class="small">选择…</button>
+        </div>
+      </div>
+      <label class="row" id="cookiesRow">
+        <span>登录信息</span>
+        <select id="cookies">
+          <option value="">不使用（未登录状态）</option>
+          <option value="chrome">读取 Chrome</option>
+          <option value="edge">读取 Edge</option>
+          <option value="firefox">读取 Firefox</option>
+          <option value="safari">读取 Safari</option>
+          <option value="brave">读取 Brave</option>
+        </select>
+      </label>
+      <p class="hint">从所选浏览器读取网站登录状态（Cookies），用于 YouTube 机器人验证 / 年龄限制、B 站 1080P 以上与大会员视频。</p>
+      <label class="row">
+        <span>同时下载</span>
+        <select id="concurrency">
+          <option value="1">1 个</option>
+          <option value="2">2 个</option>
+          <option value="3">3 个</option>
+        </select>
+      </label>
+      <label class="check"><input id="autoFix" type="checkbox"> 自动转码为 Premiere 兼容格式（VP9/AV1/Opus → H.264/AAC）</label>
+      <label class="check"><input id="autoStart" type="checkbox"> 粘贴链接后立即开始下载</label>
+
+      <div class="tools" id="toolsBox">
+        <div class="tools-head">下载组件</div>
+        <ul id="toolList"></ul>
+        <div class="tools-actions">
+          <button id="installBtn" class="small">安装 / 修复组件</button>
+          <button id="updateBtn" class="small">更新 yt-dlp</button>
+          <button id="redetectBtn" class="small">重新检测</button>
+        </div>
+      </div>
+    </section>
+
+    <main id="list"></main>
+
+    <div id="empty" class="empty">
+      <svg class="empty-icon"><use href="#i-link"/></svg>
+      <div class="empty-title">粘贴链接，素材直达项目</div>
+      <div class="empty-sub">支持 YouTube、Bilibili、抖音、Vimeo、X 等上千个网站<br>下载完成后自动出现在项目面板的素材箱中</div>
+      <div class="empty-sub dim">也可以把浏览器地址栏的链接直接拖到这里</div>
+    </div>
+
+    <footer>
+      <span id="status">正在检测组件…</span>
+      <button id="clearBtn" class="link hidden">清除已完成</button>
+    </footer>
+  </div>
+
+  <div id="dropMask" class="drop-mask hidden">松开以下载</div>
+
+  <script src="js/downloader.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
